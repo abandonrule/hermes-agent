@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import threading
+import uuid
 import urllib.parse
 import urllib.request
 import urllib.error
@@ -2017,10 +2018,14 @@ def normalize_opencode_model_id(provider_id: Optional[str], model_id: Optional[s
     return current
 
 
-# OpenCode Zen free-tier models (``*-free`` slugs plus unsuffixed ones like big-pickle) are
-# served ANONYMOUSLY on the Zen relay: no Authorization header succeeds, while ANY unrecognized
-# non-empty bearer — including our placeholder and OpenCode GO subscription keys — is 401'd (the
-# Go relay doesn't serve the free tier at all).
+# OpenCode Zen free-tier models (unsuffixed slugs like big-pickle; the ``*-free`` catalog was
+# delisted 2026-09-14 — GET reports them 401 "Model not supported") are served ANONYMOUSLY on
+# the Zen relay: no Authorization header succeeds, and the relay gates the free tier on the
+# opencode client fingerprint — requests must present BOTH the ``opencode/<ver>`` User-Agent AND
+# an ``x-opencode-session`` header (any value; the console never validates the id), otherwise they
+# are 429'd (FreeUsageLimitError) or 400'd (MissingSessionID) instead of served (verified live
+# 2026-09-14). The keyless placeholder + opencode client headers (+ our attribution headers) are
+# the correct shape for every free-tier request. The Go relay doesn't serve the free tier at all.
 OPENCODE_ZEN_FREE_KEYLESS_PLACEHOLDER = "opencode-zen-free-keyless"
 _OPENCODE_ZEN_FREE_BASE_URL = "https://opencode.ai/zen/v1"
 
@@ -2040,17 +2045,24 @@ _OPENCODE_FREE_LIVE_MEMO_TTL = 300.0  # 5 min; SWR disk cache handles the rest
 
 def opencode_zen_free_headers() -> dict:
     """Client default_headers for anonymous Zen free-tier requests. ``Authorization: ""`` overrides the
-    OpenAI SDK's ``Bearer <api_key>`` so the placeholder never reaches the wire (the relay 401s any
-    unknown bearer). Attribution headers mirror the opencode provider profile."""
+    OpenAI SDK's ``Bearer <api_key>`` so the placeholder never reaches the wire. The relay gates the
+    free tier on the opencode client fingerprint — the ``opencode/<ver>`` User-Agent plus an
+    ``x-opencode-session`` header (any value, never validated). Attribute as the opencode CLI via the
+    same x-opencode-* set while attribution keeps riding ``HTTP-Referer`` / ``X-Title``."""
     try:
         from hermes_cli import __version__ as _v
     except Exception:
         _v = "0"
+    sid = uuid.uuid4().hex
     return {
         "Authorization": "",
         "HTTP-Referer": "https://hermes-agent.nousresearch.com",
         "X-Title": "Hermes Agent",
-        "User-Agent": f"HermesAgent/{_v}"}
+        "User-Agent": f"opencode/{_v}",
+        "x-opencode-session": f"ses_{sid}",
+        "x-opencode-request": f"msg_{uuid.uuid4().hex}",
+        "x-opencode-project": "global",
+        "x-opencode-client": "cli"}
 
 
 def _fetch_opencode_free_models(
@@ -2112,13 +2124,19 @@ def opencode_zen_free_runtime(provider_id: Optional[str], model_id: Optional[str
     """Keyless runtime entry for an OpenCode Zen free-tier model, or None. Fires when ``provider_id``
     is ``opencode-free`` (EVERY model on it routes anonymously) or when any other OpenCode-family
     provider selected a model in the known keyless catalog (static floor ∪ cached live catalog —
-    never a blocking fetch), healing a free-model pick made under Zen/Go whose keys the free tier
+    never a blocking fetch) or a verified unsuffixed free slug (``_OPENCODE_KEYLESS_EXTRA_SLUGS``,
+    e.g. big-pickle) — healing a free-model pick made under Zen/Go whose keys the free tier
     rejects."""
     family = opencode_provider_family(provider_id)
     if family is None:
         return None
     normalized = normalize_opencode_model_id(provider_id, model_id)
-    if family != "opencode-free" and normalized.strip().lower() not in _opencode_free_known_model_slugs():
+    bare = normalized.strip().lower()
+    if (
+        family != "opencode-free"
+        and bare not in _opencode_free_known_model_slugs()
+        and bare not in _OPENCODE_KEYLESS_EXTRA_SLUGS
+    ):
         return None
     api_mode = opencode_model_api_mode("opencode-zen", normalized)
     base_url = normalize_opencode_base_url("opencode-zen", api_mode, _OPENCODE_ZEN_FREE_BASE_URL)

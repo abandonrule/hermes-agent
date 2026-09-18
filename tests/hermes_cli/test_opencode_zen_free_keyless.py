@@ -1,17 +1,19 @@
-"""OpenCode Zen free-tier keyless routing (x-preview-f-free / "Ox Alpha").
+"""OpenCode Zen free-tier keyless routing (x-preview-f-free / big-pickle / "Ox Alpha").
 
-The Zen relay serves ``*-free`` models ANONYMOUSLY: a request with no
-Authorization header succeeds, while any non-empty bearer the relay doesn't
-recognize — including our historical "no-key-required" placeholder and valid
-OpenCode GO subscription keys — is rejected with 401 "Invalid API key".
-The Go relay doesn't serve the free tier at all ("Model x is not supported").
+The Zen relay serves ``*-free`` models (plus unsuffixed slugs like big-pickle)
+ANONYMOUSLY. The free tier is gated on the opencode client fingerprint — the
+``opencode/<ver>`` User-Agent plus an ``x-opencode-session`` header (any value,
+never validated). Requests missing either are 429/400'd, while a keyless or
+recognized-bearer request that presents both is served (verified live 2026-09-14).
 
 These tests pin the keyless routing added for the community report where the
 free Ox Alpha model failed under an OpenCode subscription:
 
 1. ``opencode_zen_free_runtime`` pins free slugs to the Zen relay with the
    keyless placeholder + empty-Authorization headers, for BOTH family
-   providers (Go selections heal to Zen).
+   providers (Go selections heal to Zen); unsuffixed free slugs like
+   big-pickle route the same way even though they are absent from the
+   ``*-free`` catalog list.
 2. ``resolve_runtime_provider`` routes free slugs keylessly with no
    OPENCODE_* credential present, and still fails closed for paid models.
 3. The keyless placeholder never reaches the wire: client default_headers
@@ -46,6 +48,22 @@ class TestFreeRuntime:
         assert rt is not None
         assert rt["base_url"] == "https://opencode.ai/zen/v1"
 
+    def test_big_pickle_unsuffixed_free_slug_routes_keyless(self):
+        """big-pickle is an UNSUFFIXED free slug: it never appears in the
+        ``*-free`` catalog list, so membership in _OPENCODE_KEYLESS_EXTRA_SLUGS
+        — not the suffix/catalog — must gate the keyless heal on Zen."""
+        rt = opencode_zen_free_runtime("opencode-zen", "big-pickle")
+        assert rt is not None
+        assert rt["base_url"] == "https://opencode.ai/zen/v1"
+        assert rt["api_key"] == OPENCODE_ZEN_FREE_KEYLESS_PLACEHOLDER
+        assert rt["api_mode"] == "chat_completions"
+        assert rt["default_headers"]["Authorization"] == ""
+
+    def test_big_pickle_go_selection_heals_to_zen(self):
+        rt = opencode_zen_free_runtime("opencode-go", "big-pickle")
+        assert rt is not None
+        assert rt["base_url"] == "https://opencode.ai/zen/v1"
+
     def test_go_ox_alpha_free_does_not_heal_to_zen(self):
         """ox-alpha-free is a KEYED Go-subscription model despite its -free
         suffix (Zen doesn't serve it; Go 401s anonymous). Membership in the
@@ -64,6 +82,8 @@ class TestFreeRuntime:
         headers = opencode_zen_free_headers()
         assert headers["Authorization"] == ""
         assert headers["X-Title"] == "Hermes Agent"
+        assert str(headers.get("User-Agent", "")).startswith("opencode/")
+        assert str(headers.get("x-opencode-session", "")).startswith("ses_")
 
 
 class TestRuntimeProviderKeylessRouting:
@@ -86,6 +106,11 @@ class TestRuntimeProviderKeylessRouting:
         assert rt["api_key"] == OPENCODE_ZEN_FREE_KEYLESS_PLACEHOLDER
         assert rt["base_url"] == "https://opencode.ai/zen/v1"
         assert rt["api_mode"] == "chat_completions"
+
+    def test_big_pickle_resolves_keyless(self):
+        rt = self._resolve("opencode-zen", "big-pickle")
+        assert rt["api_key"] == OPENCODE_ZEN_FREE_KEYLESS_PLACEHOLDER
+        assert rt["base_url"] == "https://opencode.ai/zen/v1"
 
     def test_go_free_model_resolves_keyless_on_zen(self):
         rt = self._resolve("opencode-go", "hy3-free")

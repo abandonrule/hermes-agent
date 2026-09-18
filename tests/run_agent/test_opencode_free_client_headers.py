@@ -1,14 +1,16 @@
 """Regression guard: opencode-free client keyless header handling.
 
 OpenCode's free tier at ``https://opencode.ai/zen/v1`` is served ANONYMOUSLY:
-requests with no recognizable Authorization bearer succeed, while any bearer
-the relay doesn't recognize — placeholders included — is rejected with 401
-"Invalid API key" (verified live 2026-08-21).
+requests with no recognizable Authorization bearer succeed (the relay gates the
+free tier on the opencode client fingerprint — the ``opencode/<ver>`` User-Agent
+plus an ``x-opencode-session`` header, which the console never validates;
+requests missing either are 429/400'd; verified live 2026-09-14).
 
 The client therefore must ship an EMPTY ``Authorization`` default header for
 every opencode-free build, which overrides the OpenAI SDK's always-injected
 ``Authorization: Bearer <api_key>`` so no credential-shaped value ever
-reaches the wire.
+reaches the wire, plus the opencode client fingerprint headers (opencode UA +
+x-opencode-session) so the free tier serves the request at all.
 """
 from unittest.mock import MagicMock, patch
 
@@ -63,9 +65,10 @@ def test_opencode_free_blanks_authorization_header(mock_openai):
 
 
 @patch("agent.process_bootstrap.OpenAI")
-def test_opencode_free_sends_hermes_attribution(mock_openai):
+def test_opencode_free_sends_hermes_attribution_with_opencode_ua(mock_openai):
     """Keyless requests still identify as Hermes (attribution headers match
-    the opencode zen/go profiles)."""
+    the opencode zen/go profiles) while presenting the opencode client UA the
+    free-tier relay gates on."""
     mock_openai.return_value = MagicMock()
     create_openai_client(
         _FakeAgent(api_key="opencode-zen-free-keyless"),
@@ -75,7 +78,8 @@ def test_opencode_free_sends_hermes_attribution(mock_openai):
     )
     headers = _zen_call_headers(mock_openai)
     assert headers.get("X-Title") == "Hermes Agent"
-    assert str(headers.get("User-Agent", "")).startswith("HermesAgent/")
+    assert str(headers.get("User-Agent", "")).startswith("opencode/")
+    assert str(headers.get("x-opencode-session", "")).startswith("ses_")
 
 
 @patch("agent.process_bootstrap.OpenAI")
